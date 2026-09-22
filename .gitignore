@@ -1,0 +1,5 @@
+/build/
+/research/
+/dist/
+*.log
+*.sqlite3*
