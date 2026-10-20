@@ -176,6 +176,58 @@ static std::string hashFile(const std::filesystem::path& path){
  if(f.bad())ok=false;if(BCryptFinishHash(hash,digest,sizeof(digest),0)<0)ok=false;BCryptDestroyHash(hash);BCryptCloseAlgorithmProvider(alg,0);
  if(!ok)throw std::runtime_error("Catalog hash failed");std::string out;const char* hex="0123456789abcdef";for(auto b:digest){out+=hex[b>>4];out+=hex[b&15];}return out;
 }
+struct CatalogSong {std::array<unsigned char,256> title{};std::array<unsigned char,10> levels{};};
+static std::map<int,CatalogSong> readCatalog(const std::filesystem::path& path,int expectedVersion){
+ std::ifstream file(path,std::ios::binary|std::ios::ate);if(!file)throw std::runtime_error("Migration catalog cannot be opened");
+ auto length=file.tellg();file.seekg(0);int header[4]{};file.read((char*)header,sizeof(header));
+ if(!file||memcmp(header,"IIDX",4)||header[1]!=expectedVersion||header[2]<1||header[2]>35000||header[3]<1||header[3]>100000||length!=std::streamoff(16LL+4LL*header[3]+2040LL*header[2]))throw std::runtime_error("Migration catalog layout mismatch");
+ file.seekg(16LL+4LL*header[3]);std::map<int,CatalogSong> songs;
+ for(int i=0;i<header[2];i++){
+  std::array<unsigned char,2040> row{};file.read((char*)row.data(),row.size());if(!file)throw std::runtime_error("Migration catalog truncated");
+  int id;memcpy(&id,row.data()+0x67c,4);if(id<0||id>=header[3])throw std::runtime_error("Migration catalog has invalid song ID");
+  CatalogSong song;memcpy(song.title.data(),row.data(),song.title.size());memcpy(song.levels.data(),row.data()+0x3ec,song.levels.size());
+  if(!songs.emplace(id,song).second)throw std::runtime_error("Migration catalog has duplicate song ID");
+ }
+ return songs;
+}
+static int catalogVersion(const std::filesystem::path& path){
+ int header[2]{};std::ifstream file(path,std::ios::binary);file.read((char*)header,sizeof(header));
+ if(!file||memcmp(header,"IIDX",4)||(header[1]!=33&&header[1]!=34))throw std::runtime_error("Invalid IIDX catalog version");
+ return header[1];
+}
+static void addOmniSongs(std::map<int,CatalogSong>& ac,const std::map<int,CatalogSong>& omni){
+ for(const auto& [id,song]:omni){
+  auto found=ac.find(id);
+  if(found==ac.end()){ac.emplace(id,song);continue;}
+  if(found->second.title!=song.title)continue;
+  for(int chart=0;chart<10;chart++)if(!found->second.levels[chart])found->second.levels[chart]=song.levels[chart];
+ }
+}
+static std::map<int,CatalogSong> combinedCatalog(const std::filesystem::path& acPath,int acVersion,const std::filesystem::path& omniPath,int omniVersion){
+ auto ac=readCatalog(acPath,acVersion);addOmniSongs(ac,readCatalog(omniPath,omniVersion));
+ return ac;
+}
+static std::vector<Score::ChartMap> matchingCharts(const std::map<int,CatalogSong>& oldSongs,const std::map<int,CatalogSong>& newSongs){
+ std::vector<Score::ChartMap> matches;
+ std::map<std::array<unsigned char,256>,int> oldTitleCounts,targetTitleCounts,targetTitleIds;
+ for(const auto& [id,song]:oldSongs)oldTitleCounts[song.title]++;
+ for(const auto& [id,song]:newSongs){targetTitleCounts[song.title]++;targetTitleIds[song.title]=id;}
+ for(const auto& [id,oldSong]:oldSongs){
+  auto it=newSongs.find(id);
+  if(it==newSongs.end()){
+   // A pre-release song can be assigned a new ID in the next AC version.
+   // Require the title to be unique in both catalogs before rekeying.
+   if(oldTitleCounts[oldSong.title]!=1||targetTitleCounts[oldSong.title]!=1)continue;
+   it=newSongs.find(targetTitleIds[oldSong.title]);
+  }
+  if(it==newSongs.end()||oldSong.title!=it->second.title)continue;
+  for(int chart=0;chart<10;chart++)if(oldSong.levels[chart]&&oldSong.levels[chart]==it->second.levels[chart])matches.push_back({id,it->first,chart});
+ }
+ return matches;
+}
+static std::vector<Score::ChartMap> matchingCharts(const std::filesystem::path& oldPath,const std::filesystem::path& newPath,int oldVersion,int newVersion){
+ return matchingCharts(readCatalog(oldPath,oldVersion),readCatalog(newPath,newVersion));
+}
 static DWORD WINAPI worker(void*){
  try{
   wchar_t own[MAX_PATH];if(!GetModuleFileNameW(self,own,MAX_PATH))return 0;directory=std::filesystem::path(own).parent_path().wstring();iniPath=directory+L"\\IIDXScore.ini";
@@ -186,14 +238,43 @@ static DWORD WINAPI worker(void*){
   std::ifstream f(catalog,std::ios::binary);int header[4]{};f.read((char*)header,sizeof(header));
   if(!f||memcmp(header,"IIDX",4)||(header[1]!=33&&header[1]!=34)||header[3]<=0||header[3]>100000)throw std::runtime_error("Invalid music database header");musicLimit=header[3];
   scope=utf8(config(L"ServerKey",L"default"))+"/iidx"+std::to_string(header[1])+"/"+hashFile(catalog);
+  auto acScope=scope;
+  auto omniName=config(L"OmniMusicDatabase",L"");std::filesystem::path omniCatalog;int omniVersion=0;std::string omniPureScope;
+  if(!omniName.empty()){
+   omniCatalog=std::filesystem::path(omniName);if(omniCatalog.is_relative())omniCatalog=std::filesystem::path(directory)/omniCatalog;
+   omniVersion=catalogVersion(omniCatalog);readCatalog(omniCatalog,omniVersion);
+   auto omniHash=hashFile(omniCatalog);
+   omniPureScope=utf8(config(L"ServerKey",L"default"))+"/iidx"+std::to_string(omniVersion)+"/"+omniHash;
+   scope+="/omni/"+omniHash;
+  }
   auto path=std::filesystem::path(config(L"DatabasePath",L"scores/IIDXScore.sqlite3"));if(path.is_relative())path=std::filesystem::path(directory)/path;
   std::filesystem::create_directories(path.parent_path());database.open(utf8(path.wstring()));
   BYTE* base=nullptr;for(int i=0;i<600&&!base;i++){base=(BYTE*)GetModuleHandleW(L"bm2dx.dll");if(!base)Sleep(100);}
   if(!base||!validate(base)){log("Unsupported or modified score ABI; no hooks installed.");return 0;}
   if((currentBuild&&header[1]!=34)||(!currentBuild&&header[1]!=33)){log("Game and music database versions differ; no hooks installed.");return 0;}
+  if(omniVersion&&omniVersion!=header[1])log("Omni index version differs from game; score matching only, game song availability unverified.");
+  if(!omniCatalog.empty()){
+   auto targetCatalog=combinedCatalog(catalog,header[1],omniCatalog,omniVersion);
+   auto charts=matchingCharts(readCatalog(catalog,header[1]),targetCatalog);
+   auto counts=database.migrateMapped(acScope,scope,charts);
+   auto message="AC score migration into AC+Omni: "+std::to_string(counts.first)+" best rows, "+std::to_string(counts.second)+" attempts copied.";log(message.c_str());
+   if(omniPureScope!=acScope){
+    charts=matchingCharts(readCatalog(omniCatalog,omniVersion),targetCatalog);
+    counts=database.migrateMapped(omniPureScope,scope,charts);
+    message="Omni score migration into AC+Omni: "+std::to_string(counts.first)+" best rows, "+std::to_string(counts.second)+" attempts copied.";log(message.c_str());
+   }
+  }
+  auto oldName=config(L"LegacyMusicDatabase",L"");
+  if(!oldName.empty()){
+   auto oldCatalog=std::filesystem::path(oldName);if(oldCatalog.is_relative())oldCatalog=std::filesystem::path(directory)/oldCatalog;
+   int oldVersion=catalogVersion(oldCatalog);
+   auto previous=utf8(config(L"ServerKey",L"default"))+"/iidx"+std::to_string(oldVersion)+"/"+hashFile(oldCatalog);
+   if(previous!=scope&&previous!=omniPureScope){auto charts=omniCatalog.empty()?matchingCharts(oldCatalog,catalog,oldVersion,header[1]):matchingCharts(readCatalog(oldCatalog,oldVersion),combinedCatalog(catalog,header[1],omniCatalog,catalogVersion(omniCatalog)));auto counts=database.migrateMapped(previous,scope,charts);
+    auto message="Legacy score migration: "+std::to_string(charts.size())+" matching charts, "+std::to_string(counts.first)+" best rows, "+std::to_string(counts.second)+" attempts copied.";log(message.c_str());}
+  }
   if(!install(base)){log("Score hook installation failed; no hooks installed.");return 0;}
   HMODULE pinned;GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,(LPCWSTR)&worker,&pinned);
-  log("IIDXScore 0.4: capture, personal getrank and appoint ghost hooks installed.");
+  log("IIDXScore 0.5.3: capture, personal getrank, appoint ghost and AC+Omni migration support installed.");
  }catch(const std::exception& e){log(e.what());}return 0;
 }
 }

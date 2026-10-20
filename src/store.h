@@ -21,6 +21,7 @@ struct Attempt {
  Best best()const{return {pg*2+great,bp,lamp};}
 };
 struct Row {int music,chart;Best best;};
+struct ChartMap {int sourceMusic,targetMusic,chart;};
 struct Ghost {int ex=-1;std::array<unsigned char,64> data{};std::array<unsigned char,0x300> gauge{};};
 struct Statement {
  sqlite3_stmt* s=nullptr;
@@ -42,7 +43,60 @@ class Database {
   exec("CREATE TABLE IF NOT EXISTS attempts(id INTEGER PRIMARY KEY,scope TEXT NOT NULL,player TEXT NOT NULL,music INTEGER NOT NULL,chart INTEGER NOT NULL,pg INTEGER,great INTEGER,bp INTEGER,lamp INTEGER,eligible INTEGER,nocount INTEGER,grade INTEGER,nosave INTEGER,raw BLOB NOT NULL,created TEXT DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));"
        "CREATE TABLE IF NOT EXISTS best(scope TEXT,player TEXT,music INTEGER,chart INTEGER,ex INTEGER,bp INTEGER,lamp INTEGER,PRIMARY KEY(scope,player,music,chart));"
        "CREATE TABLE IF NOT EXISTS cache_observations(scope TEXT,player TEXT,music INTEGER,chart INTEGER,ex INTEGER,bp INTEGER,lamp INTEGER,observed TEXT DEFAULT CURRENT_TIMESTAMP);"
-       "CREATE INDEX IF NOT EXISTS attempts_player ON attempts(scope,player,music,chart);");
+       "CREATE INDEX IF NOT EXISTS attempts_player ON attempts(scope,player,music,chart);"
+       "CREATE INDEX IF NOT EXISTS attempts_migration ON attempts(scope,music,chart);"
+       "CREATE INDEX IF NOT EXISTS best_migration ON best(scope,music,chart);");
+ }
+ // Catalog matching is done by the caller. Re-running this migration is safe:
+ // best is merged by independent maxima/minima, and source attempts are copied once.
+ std::pair<int,int> migrate(const std::string& from,const std::string& to,const std::vector<std::pair<int,int>>& charts){
+  std::vector<ChartMap> mapped;for(auto [music,chart]:charts)mapped.push_back({music,music,chart});
+  return migrateMapped(from,to,mapped);
+ }
+ std::pair<int,int> migrateMapped(const std::string& from,const std::string& to,const std::vector<ChartMap>& charts){
+  exec("CREATE TABLE IF NOT EXISTS migrated_attempts(source_scope TEXT NOT NULL,source_id INTEGER NOT NULL,target_scope TEXT NOT NULL,target_id INTEGER NOT NULL,PRIMARY KEY(source_scope,source_id,target_scope));");
+  exec("BEGIN IMMEDIATE");int bestCount=0,attemptCount=0;
+  try{
+   Statement bestRows(db,"SELECT player,ex,bp,lamp FROM best WHERE scope=? AND music=? AND chart=?");
+   Statement mergeBest(db,"INSERT INTO best(scope,player,music,chart,ex,bp,lamp) VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope,player,music,chart) DO UPDATE SET ex=max(best.ex,excluded.ex),lamp=max(best.lamp,excluded.lamp),bp=CASE WHEN excluded.bp<0 THEN best.bp WHEN best.bp<0 THEN excluded.bp ELSE min(best.bp,excluded.bp) END WHERE excluded.ex>best.ex OR excluded.lamp>best.lamp OR (excluded.bp>=0 AND (best.bp<0 OR excluded.bp<best.bp))");
+   Statement attemptRows(db,"SELECT a.id FROM attempts a WHERE a.scope=? AND a.music=? AND a.chart=? AND a.eligible=1 AND NOT EXISTS(SELECT 1 FROM migrated_attempts m WHERE m.source_scope=a.scope AND m.source_id=a.id AND m.target_scope=?)");
+   Statement copyAttempt(db,"INSERT INTO attempts(scope,player,music,chart,pg,great,bp,lamp,eligible,nocount,grade,nosave,raw,created) SELECT ?,player,?,chart,pg,great,bp,lamp,eligible,nocount,grade,nosave,raw,created FROM attempts WHERE id=?");
+   Statement sourceRaw(db,"SELECT raw FROM attempts WHERE id=?");
+   Statement updateRaw(db,"UPDATE attempts SET raw=? WHERE id=?");
+   Statement markAttempt(db,"INSERT INTO migrated_attempts(source_scope,source_id,target_scope,target_id) VALUES(?,?,?,?)");
+   for(auto [music,targetMusic,chart]:charts){
+    sqlite3_reset(bestRows.s);sqlite3_clear_bindings(bestRows.s);bestRows.text(1,from);bestRows.num(2,music);bestRows.num(3,chart);
+    int status;
+    while((status=sqlite3_step(bestRows.s))==SQLITE_ROW){
+     const char* player=(const char*)sqlite3_column_text(bestRows.s,0);if(!player)continue;
+     sqlite3_reset(mergeBest.s);sqlite3_clear_bindings(mergeBest.s);
+     mergeBest.text(1,to);mergeBest.text(2,player);mergeBest.num(3,targetMusic);mergeBest.num(4,chart);
+     for(int j=0;j<3;j++)mergeBest.num(5+j,sqlite3_column_int(bestRows.s,1+j));mergeBest.done();bestCount++;
+    }
+    if(status!=SQLITE_DONE)throw std::runtime_error("Migration best read failed");
+    sqlite3_reset(attemptRows.s);sqlite3_clear_bindings(attemptRows.s);attemptRows.text(1,from);attemptRows.num(2,music);attemptRows.num(3,chart);attemptRows.text(4,to);
+    while((status=sqlite3_step(attemptRows.s))==SQLITE_ROW){
+     int id=sqlite3_column_int(attemptRows.s,0);
+     sqlite3_reset(copyAttempt.s);sqlite3_clear_bindings(copyAttempt.s);copyAttempt.text(1,to);copyAttempt.num(2,targetMusic);copyAttempt.num(3,id);copyAttempt.done();
+     int target=(int)sqlite3_last_insert_rowid(db);
+     if(music!=targetMusic){
+      sqlite3_reset(sourceRaw.s);sqlite3_clear_bindings(sourceRaw.s);sourceRaw.num(1,id);
+      if(sqlite3_step(sourceRaw.s)!=SQLITE_ROW||sqlite3_column_bytes(sourceRaw.s,0)!=0xea0)throw std::runtime_error("Renumbered attempt raw snapshot invalid");
+      std::array<unsigned char,0xea0> raw{};memcpy(raw.data(),sqlite3_column_blob(sourceRaw.s,0),raw.size());
+      int rawMusic;memcpy(&rawMusic,raw.data()+0x10,sizeof(rawMusic));
+      if(rawMusic!=music)throw std::runtime_error("Renumbered attempt raw song ID mismatch");
+      sqlite3_reset(sourceRaw.s);
+      memcpy(raw.data()+0x10,&targetMusic,sizeof(targetMusic));
+      sqlite3_reset(updateRaw.s);sqlite3_clear_bindings(updateRaw.s);
+      if(sqlite3_bind_blob(updateRaw.s,1,raw.data(),(int)raw.size(),SQLITE_TRANSIENT)!=SQLITE_OK)throw std::runtime_error("bind raw");
+      updateRaw.num(2,target);updateRaw.done();
+     }
+     sqlite3_reset(markAttempt.s);sqlite3_clear_bindings(markAttempt.s);markAttempt.text(1,from);markAttempt.num(2,id);markAttempt.text(3,to);markAttempt.num(4,target);markAttempt.done();attemptCount++;
+    }
+    if(status!=SQLITE_DONE)throw std::runtime_error("Migration attempt read failed");
+   }
+   exec("COMMIT");return {bestCount,attemptCount};
+  }catch(...){exec("ROLLBACK");throw;}
  }
  void save(const std::string& scope,const Attempt& a){
   if(!a.valid())throw std::runtime_error("Invalid score snapshot");
