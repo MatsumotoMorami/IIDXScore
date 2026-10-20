@@ -1,6 +1,6 @@
 # Current build evidence
 
-Game: bm2dx.dll, PE timestamp 0x69ddf5f8, SizeOfImage 0xbb47000.
+Original baseline: bm2dx.dll, PE timestamp 0x69ddf5f8, SizeOfImage 0xbb47000. Current supported builds are listed below.
 
 music.reg writer: RVA 0xab6d60..0xab8564; dispatch slot 0x10536b0.
 getrank reader: RVA 0xab3240..0xab3d1f; dispatch slot 0x10535f8.
@@ -21,3 +21,5 @@ reg per-play ghost is raw+0x34 (64 bytes); gauge is raw+0x74 (0x300 bytes). Quer
 User confirmed score persistence and selection-screen display in v0.1. Remaining gameplay checks for v0.2: ghost graph display/refresh, native no-save coverage, different modes, and real server behavior. Static/isolated success does not prove these.
 
 0.3 adds timestamp 0x6a8bafd1 / image size 0xbb93000. New rank RVA 0xad7ad0..0xad85af, slot 0x1090d88; reg 0xadb5f0..0xadcdf4, slot 0x1090e40; appoint 0xad6310..0xad7390, slot 0x1090ea8. Full instruction sequences normalized only for RIP-relative addresses and branch/call destinations match the April functions; data field offsets and constants are unchanged. Separate code hashes and rank entry hash remain mandatory. Native chart converter moves to 0x82cce0. Test AVS import slots move by 0x2e000 (verified by DLL+ordinal identity). Both April and August real parsers pass isolated tests, including the locally patched August game image. Database namespace still depends on catalog, not executable timestamp; changing only game DLL does not fork saved scores.
+
+0.4 adds the locally patched `2026091600-010` IIDX 34 PE (timestamp `0x6aa23d57`, image `0xc5ff000`). Rank is RVA `0xabf4a0..0xac0080`, dispatch slot `0x10540e8`; reg is `0xac2a30..0xac4234`, slot `0x10541a0`; appoint is `0xabda50..0xabead0`, slot `0x1054208`. Whole-function hashes and entry hashes are checked. The reg and appoint instruction sequences match the August functions after relocation normalization. Rank retains the personal score cache fields but adds a separate native cache pointer at request offsets `+0x40/+0x48`, which Score does not modify. The isolated test supplies this new field and runs the actual rank/appoint parsers, including server-better and local-fallback cases; it also verifies the native chart converter at `0x81a5c0`. Imports are matched by `avs2-core.dll` ordinal, not assumed uniform RVA shifts. The stock catalog is `data/info/0/music_data.bin` (header version 34); scope now includes the catalog version and hash. No live game injection or server upload was used for this validation.

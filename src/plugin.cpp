@@ -122,19 +122,25 @@ static constexpr Target targetsAugust[]={
  {0xadb5f0,0xadcdf4,0x1090e40,0xa586ab6fd816877cULL},
  {0xad6310,0xad7390,0x1090ea8,0xb5291c30cead53e7ULL}
 };
+static constexpr Target targetsSeptember[]={
+ {0xabf4a0,0xac0080,0x10540e8,0x21048fdf5a9cf31dULL},
+ {0xac2a30,0xac4234,0x10541a0,0x0488067a4d603138ULL},
+ {0xabda50,0xabead0,0x1054208,0x14b9251013ef812dULL}
+};
 static const Target* targets=targetsApril;
-static bool latestBuild=false;
+static bool latestBuild=false,currentBuild=false;
 static uint64_t fnv(const BYTE* p,size_t n){uint64_t h=14695981039346656037ULL;for(size_t i=0;i<n;i++)h=(h^p[i])*1099511628211ULL;return h;}
 static bool validate(BYTE* base){
  IMAGE_DOS_HEADER dos{};IMAGE_NT_HEADERS64 nt{};
  if(!read(base,&dos,sizeof(dos))||dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<0||dos.e_lfanew>0x1000||!read(base+dos.e_lfanew,&nt,sizeof(nt)))return false;
  if(nt.Signature!=IMAGE_NT_SIGNATURE||nt.FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64)return false;
+ currentBuild=nt.FileHeader.TimeDateStamp==0x6aa23d57&&nt.OptionalHeader.SizeOfImage==0xc5ff000;
  latestBuild=nt.FileHeader.TimeDateStamp==0x6a8bafd1&&nt.OptionalHeader.SizeOfImage==0xbb93000;
- if(!latestBuild&&(nt.FileHeader.TimeDateStamp!=0x69ddf5f8||nt.OptionalHeader.SizeOfImage!=0xbb47000))return false;
- targets=latestBuild?targetsAugust:targetsApril;
+ if(!currentBuild&&!latestBuild&&(nt.FileHeader.TimeDateStamp!=0x69ddf5f8||nt.OptionalHeader.SizeOfImage!=0xbb47000))return false;
+ targets=currentBuild?targetsSeptember:(latestBuild?targetsAugust:targetsApril);
  BYTE rankPrefix[32],regPrefix[32];
  if(!read(base+targets[0].rva,rankPrefix,32)||!read(base+targets[1].rva,regPrefix,32))return false;
- if(fnv(rankPrefix,32)!=(latestBuild?0xc0cb74d4de56ce96ULL:0x8fc05328d6b09b84ULL))return false;
+ if(fnv(rankPrefix,32)!=(currentBuild?0x883334e56ba575deULL:(latestBuild?0xc0cb74d4de56ce96ULL:0x8fc05328d6b09b84ULL)))return false;
  BYTE appointPrefix[32];if(!read(base+targets[2].rva,appointPrefix,32)||fnv(appointPrefix,32)!=0xc9a66f5264ba7c6eULL)return false;
  // A pre-existing reg detour is allowed only in a recognized entry-jump form.
  // We call that entry, preserving the other module's hook chain.
@@ -176,16 +182,18 @@ static DWORD WINAPI worker(void*){
   if(!GetPrivateProfileIntW(L"Score",L"Enabled",1,iniPath.c_str()))return 0;
   overlay=GetPrivateProfileIntW(L"Score",L"Overlay",1,iniPath.c_str())!=0;
   ghostOverlay=GetPrivateProfileIntW(L"Score",L"GhostOverlay",1,iniPath.c_str())!=0;
-  auto catalog=std::filesystem::path(config(L"MusicDatabase",L"data_mods/ominimix/info/1/music_omni.bin"));if(catalog.is_relative())catalog=std::filesystem::path(directory)/catalog;
+  auto catalog=std::filesystem::path(config(L"MusicDatabase",L"data/info/0/music_data.bin"));if(catalog.is_relative())catalog=std::filesystem::path(directory)/catalog;
   std::ifstream f(catalog,std::ios::binary);int header[4]{};f.read((char*)header,sizeof(header));
-  if(!f||memcmp(header,"IIDX",4)||header[1]!=33||header[3]<=0||header[3]>100000)throw std::runtime_error("Invalid music database header");musicLimit=header[3];
-  scope=utf8(config(L"ServerKey",L"default"))+"/iidx33/"+hashFile(catalog);
+  if(!f||memcmp(header,"IIDX",4)||(header[1]!=33&&header[1]!=34)||header[3]<=0||header[3]>100000)throw std::runtime_error("Invalid music database header");musicLimit=header[3];
+  scope=utf8(config(L"ServerKey",L"default"))+"/iidx"+std::to_string(header[1])+"/"+hashFile(catalog);
   auto path=std::filesystem::path(config(L"DatabasePath",L"scores/IIDXScore.sqlite3"));if(path.is_relative())path=std::filesystem::path(directory)/path;
   std::filesystem::create_directories(path.parent_path());database.open(utf8(path.wstring()));
   BYTE* base=nullptr;for(int i=0;i<600&&!base;i++){base=(BYTE*)GetModuleHandleW(L"bm2dx.dll");if(!base)Sleep(100);}
-  if(!base||!install(base)){log("Unsupported or modified score ABI; no hooks installed.");return 0;}
+  if(!base||!validate(base)){log("Unsupported or modified score ABI; no hooks installed.");return 0;}
+  if((currentBuild&&header[1]!=34)||(!currentBuild&&header[1]!=33)){log("Game and music database versions differ; no hooks installed.");return 0;}
+  if(!install(base)){log("Score hook installation failed; no hooks installed.");return 0;}
   HMODULE pinned;GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,(LPCWSTR)&worker,&pinned);
-  log("IIDXScore 0.3: capture, personal getrank and appoint ghost hooks installed.");
+  log("IIDXScore 0.4: capture, personal getrank and appoint ghost hooks installed.");
  }catch(const std::exception& e){log(e.what());}return 0;
 }
 }

@@ -68,17 +68,30 @@ int main(int argc,char** argv){
  auto game=(BYTE*)LoadLibraryExA(argv[1],nullptr,DONT_RESOLVE_DLL_REFERENCES);check(game!=nullptr,"map game PE without init");
  mappedGame=(uintptr_t)game;
  check(App::validate(game),"real PE fingerprints");
- const DWORD iatShift=App::latestBuild?0x2e000:0;
+ auto iat=[](DWORD old)->DWORD{
+  if(App::currentBuild){switch(old){
+   case 0xc61dd0:return 0xc66de8; // avs2-core ordinal 175
+   case 0xc61f50:return 0xc66f60; // ordinal 162
+   case 0xc61eb8:return 0xc67088; // ordinal 172
+   case 0xc62060:return 0xc67070; // ordinal 167
+   case 0xc61f58:return 0xc66f68; // ordinal 171
+   case 0xc61ee0:return 0xc67220; // ordinal 176
+   case 0xc61f80:return 0xc66f90; // ordinal 224
+  }}
+  return old+(App::latestBuild?0x2e000:0);
+ };
  auto slot=(void**)(game+App::targets[0].slot);auto original=*slot;setPointer(slot,nullptr);check(!App::validate(game),"changed dispatch rejected");setPointer(slot,original);
  auto instruction=game+App::targets[0].rva+40;DWORD old;VirtualProtect(instruction,1,PAGE_READWRITE,&old);BYTE prior=*instruction;*instruction^=1;check(!App::validate(game),"changed ABI rejected");*instruction=prior;DWORD unused;VirtualProtect(instruction,1,old,&unused);
  check(App::install(game),"install in isolated PE only");
- setPointer(game+iatShift+0xc61dd0,(void*)propertyStub);setPointer(game+iatShift+0xc61f50,(void*)searchStub);
+ setPointer(game+iat(0xc61dd0),(void*)propertyStub);setPointer(game+iat(0xc61f50),(void*)searchStub);
  // Actual native getrank reader receives an empty server response; then the hook fills local best.
  memset(req.data(),0,req.size());memcpy(req.data(),"12345678",9);put(req.data(),0x20,(void*)(cache.data()+1));put(req.data(),0x28,(void*)(dp.data()+1));
+ std::array<unsigned char,22*0x18> extraSp{},extraDp{};
+ if(App::currentBuild){put(req.data(),0x40,(void*)(extraSp.data()+0x18));put(req.data(),0x48,(void*)(extraDp.data()+0x18));}
  cache[4].ex[1]=-1;cache[4].bp[1]=-1;cache[4].lamp[1]=0;
  check(((App::Method)*slot)(ctx.data(),nullptr),"execute actual native getrank parser + overlay");
  check(cache[4].ex[1]==2480&&cache[4].bp[1]==4&&cache[4].lamp[1]==6,"actual parser empty-server fallback");
- setPointer(game+iatShift+0xc61eb8,(void*)nodeReadStub);setPointer(game+iatShift+0xc62060,(void*)nextStub);
+ setPointer(game+iat(0xc61eb8),(void*)nodeReadStub);setPointer(game+iat(0xc62060),(void*)nextStub);
  std::array<unsigned char,22*0x48> nativeArenaCache{};
  put(req.data(),0x30,(void*)nativeArenaCache.data());
  serverRow[0]=-1;serverRow[1]=3;
@@ -87,7 +100,7 @@ int main(int argc,char** argv){
  check(((App::Method)*slot)(ctx.data(),nullptr),"actual parser populated-server response");
  check(cache[4].ex[1]==3000&&cache[4].bp[1]==4&&cache[4].lamp[1]==6,"real parser retains remote score and local lamp/BP");
  // Verify actual game's chart conversion: B/N/H/A/L and SP/DP use consecutive groups of five.
- auto convert=(int(*)(int,int))(game+(App::latestBuild?0x82cce0:0x815250));
+ auto convert=(int(*)(int,int))(game+(App::currentBuild?0x81a5c0:(App::latestBuild?0x82cce0:0x815250)));
  for(int style=0;style<2;style++)for(int chart=0;chart<5;chart++)check(convert(chart,style)==style*5+chart,"native chart mapping");
  // Recover exact ghost bytes from an old-format snapshot, not from the independent lamp/BP best.
  Score::Attempt g;g.player="12345678";g.music=7;g.chart=3;g.pg=900;g.great=123;g.bp=80;g.lamp=2;
@@ -115,8 +128,8 @@ int main(int argc,char** argv){
  memset(req.data(),0,req.size());put(req.data(),0,7);put(req.data(),4,3);memcpy(req.data()+0x110,"12345678",9);
  put(ctx.data(),0x78,(void*)(appointResponse.data()+1));auto res=appointResponse.data()+1;
  appointResponse.front()=0x7b;appointResponse.back()=0x7c;res[0x25]=0x51;
- setPointer(game+iatShift+0xc61f58,(void*)nodeSizeStub);setPointer(game+iatShift+0xc61ee0,(void*)attributeStub);
- setPointer(game+iatShift+0xc61f80,(void*)stringCopyStub);
+ setPointer(game+iat(0xc61f58),(void*)nodeSizeStub);setPointer(game+iat(0xc61ee0),(void*)attributeStub);
+ setPointer(game+iat(0xc61f80),(void*)stringCopyStub);
  auto appoint=*(App::Method*)(game+App::targets[2].slot);hasServerRow=false;hasServerGhost=false;
  check(appoint(ctx.data(),nullptr),"actual appoint empty-server parse + overlay");
  check(res[0xa5]==1&&!memcmp(res+0x65,expected.data()+0x34,64)&&res[0x6a8]==1&&!memcmp(res+0x3a8,expected.data()+0x74,0x300),"native own ghost/gauge from same attempt");
