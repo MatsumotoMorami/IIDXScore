@@ -52,6 +52,10 @@
 
 ## 旧曲库成绩迁移
 
+**推荐自动迁移：** 从同一 Release 下载 `IIDXScoreAutoMigrate-v0.5.3-win64.zip`，按 [自动迁移说明](tools/自动迁移说明.md) 将旧索引放入 `IIDXScoreLegacy` 并双击 `MigrateScores.bat`。工具会检查全部曲库作用域、备份数据库和 INI、写入迁移结果并更新 INI；游戏必须已退出。若只想先看预计数量，使用只读 `IIDXScoreDryRun.exe`。
+
+**手动迁移：** 下述配置适合需要自行检查或修改路径的用户。配置后由 DLL 在下次启动时正式迁移。
+
 先退出游戏，用 SQLite 备份功能备份完整数据库；不要只复制正在使用 WAL 的主文件。`MusicDatabase` 指向当前 IIDX 34 AC 曲库；若实际使用 Omni，再让 `OmniMusicDatabase` 指向本地 Omni 索引，组成 AC+Omni 成绩作用域：相同歌曲 ID 优先使用 AC 标题及已有谱面，Omni 补充 AC 缺失的歌曲或谱面。`LegacyMusicDatabase` 指向产生旧成绩时使用的**确切** `music_omni.bin` 或 `music_data.bin`，并保持原来的 `DatabasePath` 和 `ServerKey`。启动时插件把同服务器的已有 AC 成绩、当前 Omni 索引对应的独立作用域成绩，以及指定旧曲库的成绩合并到 AC+Omni 作用域；歌曲 ID 相同时要求标题原始字节、对应 SP/DP 档位和难度等级一致。旧歌曲 ID 在目标索引不存在时，只有新旧索引中的标题各自唯一且谱面等级一致，才按目标 ID 合并。EX、灯和 BP 各自取较优值；旧作用域不删除。此后新游玩直接写入 AC+Omni 作用域。迁移可重复执行，原始游玩快照不会被重复复制。
 
 `OmniMusicDatabase` 只用于成绩匹配，不安装、启用或验证游戏中的 Omni 曲包。如果游戏实际未加载这些歌曲，迁移出的成绩会留在数据库中，但游戏不会显示不存在的歌曲。不要把旧 IIDX 33 Omni 索引误当作已适配 IIDX 34 的游戏曲包。
